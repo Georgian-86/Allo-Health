@@ -1,160 +1,64 @@
-# Allo Reservation System
+# allo-reservation
 
-A Next.js application for managing inventory reservations across multiple warehouses. Handles the race condition between payment processing and inventory availability by temporarily reserving units during checkout.
+Inventory reservation system for multi-warehouse retail. Handles the race condition between payment processing and available stock by holding units during checkout.
 
-## How It Works
+## How it works
 
-When a customer proceeds to checkout:
-1. Units are temporarily **reserved** for 10 minutes
-2. If payment succeeds, the reservation is **confirmed** and stock is permanently decremented
-3. If payment fails or time expires, the reservation is **released** and units become available again
+When a customer proceeds to checkout, the API temporarily reserves units for 10 minutes. If payment succeeds, the reservation is confirmed and stock is permanently decremented. If payment fails or the timer expires, the hold is released and units become available again.
 
-This prevents overselling while maintaining good conversion rates.
+The core of the concurrency guarantee is a `SELECT ... FOR UPDATE` lock inside a database transaction. Two requests arriving simultaneously for the last unit of a SKU will serialize at the lock — exactly one gets a 201, the other a 409.
 
-## Setup
+## Running locally
 
-### Prerequisites
-- Node.js 18+
-- A Supabase or Neon PostgreSQL database
-- (Optional) Redis for idempotent request handling
-
-### Installation
-
-1. Clone the repo and install dependencies:
 ```bash
 npm install
-```
-
-2. Set up environment variables:
-```bash
 cp .env.local.example .env.local
+# fill in DATABASE_URL and DIRECT_URL from your Supabase project settings
 ```
 
-Edit `.env.local` with your database URL and any other settings.
-
-3. Run migrations:
+Run migrations and seed:
 ```bash
-npm run prisma:migrate
-```
-
-4. Seed test data:
-```bash
-npm run prisma:seed
-```
-
-5. Start the dev server:
-```bash
+npx prisma migrate dev --name init
+node prisma/seed.js
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to see the app.
+Open http://localhost:3000.
 
-## API Endpoints
+## Environment variables
 
-### Products
-- **GET** `/api/products` - List products with stock per warehouse
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | Supabase pooler connection string (port 5432, session mode) |
+| `DIRECT_URL` | Direct Supabase connection for migrations (port 5432, direct) |
+| `CLEANUP_SECRET` | Optional header secret for the `/api/cleanup` endpoint |
 
-### Warehouses
-- **GET** `/api/warehouses` - List all warehouses
+## API
 
-### Reservations
-- **POST** `/api/reservations` - Create a reservation (10-minute hold)
-  - Returns `201` on success
-  - Returns `409` if insufficient stock
-  
-- **POST** `/api/reservations/:id` - Confirm or release a reservation
-  - Body: `{ action: "confirm" | "release" }`
-  - Confirm returns `410` if expired
-  
-### Cleanup
-- **POST** `/api/cleanup` - Manually trigger expired reservation cleanup
-  - Optional header: `x-cleanup-secret` for security
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/products` | Products with stock per warehouse |
+| GET | `/api/warehouses` | All warehouses |
+| POST | `/api/reservations` | Create reservation (returns 409 if insufficient stock) |
+| POST | `/api/reservations/:id/confirm` | Confirm reservation (returns 410 if expired) |
+| POST | `/api/reservations/:id/release` | Release reservation early |
+| POST | `/api/cleanup` | Release all expired pending reservations |
 
-## Concurrency Safety
+The reserve endpoint accepts an optional `Idempotency-Key` header. Retrying with the same key returns the original response without creating a duplicate reservation.
 
-The reservation endpoint uses **database transactions with row-level locks** (`SELECT ... FOR UPDATE`) to ensure exactly one request succeeds when two arrive simultaneously for the last unit:
+## Expiry mechanism
 
-1. Lock the `stock_levels` row for the product/warehouse
-2. Check available units (total - reserved)
-3. If enough, create reservation and increment reserved units
-4. If not enough, return 409 before lock is released
-5. Lock ensures atomicity; other concurrent requests wait and see updated reserved count
+In production (Vercel), `vercel.json` schedules `POST /api/cleanup` every minute via Vercel Cron. The endpoint finds all `pending` reservations past their `expiresAt`, marks them `released`, and decrements `reservedUnits` back to the stock level — atomically, per reservation.
 
-This approach is simpler and safer than distributed locks and doesn't require external services.
+The frontend also handles expiry gracefully: the countdown timer zeroes out and the UI resets to the reservation form so the user can try again.
 
-## Reservation Expiry
+## Concurrency
 
-Expired reservations are cleaned up automatically via a cleanup route that can be called by:
+The reservation endpoint uses `SELECT ... FOR UPDATE` inside a Prisma `$transaction`. This locks the `stock_levels` row for the duration of the transaction, so concurrent requests for the same product/warehouse serialize. The second request sees the updated `reservedUnits` after the lock is released, and if stock is now insufficient, it gets a 409.
 
-- **Vercel Cron**: Add to `vercel.json`:
-  ```json
-  {
-    "crons": [{
-      "path": "/api/cleanup",
-      "schedule": "*/1 * * * *"
-    }]
-  }
-  ```
+## Trade-offs and what I'd do differently
 
-- **External scheduler** (e.g., GitHub Actions): `POST /api/cleanup` with optional `x-cleanup-secret` header
-
-- **Lazy cleanup**: On first load after expiry, the cleanup runs automatically
-
-The cleanup endpoint:
-- Finds all pending reservations past `expiresAt`
-- Releases them atomically (marks as released, decrements reserved units)
-- Returns count of cleaned reservations
-
-## Frontend Flow
-
-1. **Product List** - Browse products, see available stock per warehouse
-2. **Checkout** - Select warehouse and quantity, create reservation
-3. **Live Countdown** - See 10-minute timer, errors displayed inline
-4. **Confirm or Cancel** - Complete purchase or release reservation
-5. **Instant Feedback** - UI updates without page refresh
-
-## Trade-offs & Future Improvements
-
-- **No session management** - Reservations tied to reservation ID, not user account. For production, associate to user and track separately.
-- **No inventory forecasting** - Doesn't predict peak demand or suggest warehouse routing. Could add demand forecasting.
-- **Cleanup frequency** - If using a cron job, every 1 minute may be too frequent or too sparse depending on workload. Adjust based on typical checkout duration.
-- **Idempotency** - Basic key tracking, no Redis. For truly distributed systems, add Redis for faster lookups.
-- **Notifications** - No email/SMS when reservation expires. Could integrate Twilio or SendGrid.
-- **Multi-region** - Database is single-region. For global scale, would need read replicas and event streaming.
-
-## Testing Concurrency
-
-To test the race condition handling:
-
-```bash
-# Terminal 1: Reserve first unit
-curl -X POST http://localhost:3000/api/reservations \
-  -H "Content-Type: application/json" \
-  -d '{"productId":"...", "warehouseId":"...", "quantity":1}'
-
-# Terminal 2: Reserve same unit simultaneously
-# Should get 409 from one, 201 from the other
-```
-
-## Stack
-
-- **Next.js 15** with App Router
-- **TypeScript** end-to-end
-- **Prisma** for database access
-- **PostgreSQL** (hosted, e.g., Supabase, Neon)
-- **Tailwind CSS** for styling
-
-## Deployment
-
-Recommended: **Vercel + Supabase**
-
-1. Push to GitHub
-2. Create new Supabase project, get connection string
-3. Connect GitHub repo to Vercel
-4. Add `DATABASE_URL` to Vercel environment variables
-5. Deploy; Vercel will auto-run migrations
-6. Add cron job in `vercel.json` for cleanup
-
----
-
-**Status**: Fully functional core system with manual test coverage. Ready for debrief.
+- **No user sessions** — reservations are ID-based. In production you'd associate them to authenticated users and show them their active reservations.
+- **Idempotency is DB-only** — the `idempotencyKey` unique constraint in Postgres is sufficient for this scale. At higher throughput, a Redis lookup would be faster (no DB hit for cache hits).
+- **Cleanup is eventually consistent** — there's a window of up to ~1 minute where expired reservations still count against available stock. An alternative would be treating `reservedUnits` as expired if `expiresAt < now` inline in the stock query, but that adds complexity to every read path.
+- **No soft delete / audit trail** — a production system would want to keep a history of reservation state changes rather than just a final status field.

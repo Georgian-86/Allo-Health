@@ -3,106 +3,52 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
 async function main() {
-  // Clear existing data
   await prisma.reservation.deleteMany({});
   await prisma.stockLevel.deleteMany({});
   await prisma.product.deleteMany({});
   await prisma.warehouse.deleteMany({});
 
-  // Create warehouses
-  const warehouse1 = await prisma.warehouse.create({
-    data: {
-      name: "Warehouse East",
-      location: "New York",
-    },
+  const [delhi, mumbai, bengaluru] = await Promise.all([
+    prisma.warehouse.create({ data: { name: "Delhi FC", location: "New Delhi" } }),
+    prisma.warehouse.create({ data: { name: "Mumbai FC", location: "Andheri East" } }),
+    prisma.warehouse.create({ data: { name: "Bengaluru FC", location: "Electronic City" } }),
+  ]);
+
+  const [testo, ashwa, sleep, omega, stack] = await Promise.all([
+    prisma.product.create({ data: { name: "Testosterone Support – 60 caps", sku: "AH-TESTO-60" } }),
+    prisma.product.create({ data: { name: "KSM-66 Ashwagandha – 500mg", sku: "AH-KSM-90" } }),
+    prisma.product.create({ data: { name: "Sleep & Recovery Formula", sku: "AH-SLEEP-30" } }),
+    prisma.product.create({ data: { name: "Omega-3 Fish Oil – 90 softgels", sku: "AH-OMEGA-90" } }),
+    prisma.product.create({ data: { name: "Daily Wellness Stack", sku: "AH-STACK-30" } }),
+  ]);
+
+  await prisma.stockLevel.createMany({
+    data: [
+      { productId: testo.id, warehouseId: delhi.id,     totalUnits: 120 },
+      { productId: testo.id, warehouseId: mumbai.id,    totalUnits: 4  },
+      { productId: testo.id, warehouseId: bengaluru.id, totalUnits: 58 },
+
+      { productId: ashwa.id, warehouseId: delhi.id,     totalUnits: 200 },
+      { productId: ashwa.id, warehouseId: mumbai.id,    totalUnits: 85  },
+      { productId: ashwa.id, warehouseId: bengaluru.id, totalUnits: 0   },
+
+      { productId: sleep.id, warehouseId: delhi.id,     totalUnits: 3  },
+      { productId: sleep.id, warehouseId: mumbai.id,    totalUnits: 40 },
+      { productId: sleep.id, warehouseId: bengaluru.id, totalUnits: 22 },
+
+      { productId: omega.id, warehouseId: delhi.id,     totalUnits: 150 },
+      { productId: omega.id, warehouseId: mumbai.id,    totalUnits: 98  },
+      { productId: omega.id, warehouseId: bengaluru.id, totalUnits: 12  },
+
+      { productId: stack.id, warehouseId: delhi.id,     totalUnits: 0  },
+      { productId: stack.id, warehouseId: mumbai.id,    totalUnits: 2  },
+      { productId: stack.id, warehouseId: bengaluru.id, totalUnits: 35 },
+    ],
   });
 
-  const warehouse2 = await prisma.warehouse.create({
-    data: {
-      name: "Warehouse West",
-      location: "Los Angeles",
-    },
-  });
-
-  // Create products
-  const product1 = await prisma.product.create({
-    data: {
-      name: "Wireless Headphones",
-      sku: "WHP-001",
-    },
-  });
-
-  const product2 = await prisma.product.create({
-    data: {
-      name: "USB-C Cable",
-      sku: "USB-001",
-    },
-  });
-
-  const product3 = await prisma.product.create({
-    data: {
-      name: "Phone Case",
-      sku: "CASE-001",
-    },
-  });
-
-  // Create stock levels
-  await prisma.stockLevel.create({
-    data: {
-      productId: product1.id,
-      warehouseId: warehouse1.id,
-      totalUnits: 50,
-    },
-  });
-
-  await prisma.stockLevel.create({
-    data: {
-      productId: product1.id,
-      warehouseId: warehouse2.id,
-      totalUnits: 30,
-    },
-  });
-
-  await prisma.stockLevel.create({
-    data: {
-      productId: product2.id,
-      warehouseId: warehouse1.id,
-      totalUnits: 200,
-    },
-  });
-
-  await prisma.stockLevel.create({
-    data: {
-      productId: product2.id,
-      warehouseId: warehouse2.id,
-      totalUnits: 150,
-    },
-  });
-
-  await prisma.stockLevel.create({
-    data: {
-      productId: product3.id,
-      warehouseId: warehouse1.id,
-      totalUnits: 100,
-    },
-  });
-
-  await prisma.stockLevel.create({
-    data: {
-      productId: product3.id,
-      warehouseId: warehouse2.id,
-      totalUnits: 80,
-    },
-  });
-
-  console.log("Seed completed");
+  console.log("seeded 5 products across 3 warehouses");
 }
 
 main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+  .catch((e) => { console.error(e); process.exit(1); })
+  .finally(() => prisma.$disconnect());
