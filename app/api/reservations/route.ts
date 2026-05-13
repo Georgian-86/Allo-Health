@@ -1,96 +1,70 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { reserveRequestSchema, confirmRequestSchema } from "@/lib/schemas";
+import { reserveRequestSchema } from "@/lib/schemas";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const idempotencyKey = req.headers.get("idempotency-key") ?? undefined;
 
-    const validation = reserveRequestSchema.safeParse(body);
-    if (!validation.success) {
+    const parsed = reserveRequestSchema.safeParse(body);
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Invalid request", details: validation.error.flatten() },
+        { error: "Invalid request", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
 
-    const { productId, warehouseId, quantity, idempotencyKey } = validation.data;
+    const { productId, warehouseId, quantity } = parsed.data;
 
-    // Check for idempotency key
     if (idempotencyKey) {
       const existing = await prisma.reservation.findUnique({
         where: { idempotencyKey },
       });
-      if (existing) {
-        return NextResponse.json(existing, { status: 200 });
-      }
+      if (existing) return NextResponse.json(existing, { status: 200 });
     }
 
-    // Use transaction with row-level lock for concurrency safety
     const reservation = await prisma.$transaction(async (tx) => {
-      // Lock the stock level row and fetch current state
-      const stockLevel = await tx.$queryRaw<
+      const rows = await tx.$queryRaw<
         { totalUnits: number; reservedUnits: number }[]
       >`
-        SELECT "totalUnits", "reservedUnits" 
-        FROM stock_levels 
+        SELECT "totalUnits", "reservedUnits"
+        FROM stock_levels
         WHERE "productId" = ${productId} AND "warehouseId" = ${warehouseId}
         FOR UPDATE
       `;
 
-      if (!stockLevel || stockLevel.length === 0) {
-        throw new Error("Stock level not found");
-      }
+      if (!rows.length) throw new Error("STOCK_NOT_FOUND");
 
-      const { totalUnits, reservedUnits } = stockLevel[0];
-      const availableUnits = totalUnits - reservedUnits;
+      const { totalUnits, reservedUnits } = rows[0];
+      if (totalUnits - reservedUnits < quantity) throw new Error("INSUFFICIENT_STOCK");
 
-      if (availableUnits < quantity) {
-        throw new Error("INSUFFICIENT_STOCK");
-      }
-
-      // Create reservation and update reserved units
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
       const newReservation = await tx.reservation.create({
-        data: {
-          productId,
-          warehouseId,
-          quantity,
-          status: "pending",
-          expiresAt,
-          idempotencyKey: idempotencyKey || undefined,
-        },
+        data: { productId, warehouseId, quantity, status: "pending", expiresAt, idempotencyKey },
       });
 
-      // Update stock level
       await tx.stockLevel.update({
-        where: {
-          productId_warehouseId: { productId, warehouseId },
-        },
-        data: {
-          reservedUnits: reservedUnits + quantity,
-        },
+        where: { productId_warehouseId: { productId, warehouseId } },
+        data: { reservedUnits: reservedUnits + quantity },
       });
 
       return newReservation;
     });
 
     return NextResponse.json(reservation, { status: 201 });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
 
-    if (message === "INSUFFICIENT_STOCK") {
-      return NextResponse.json(
-        { error: "Insufficient stock available" },
-        { status: 409 }
-      );
+    if (msg === "INSUFFICIENT_STOCK") {
+      return NextResponse.json({ error: "Insufficient stock available" }, { status: 409 });
+    }
+    if (msg === "STOCK_NOT_FOUND") {
+      return NextResponse.json({ error: "Product not found at this warehouse" }, { status: 404 });
     }
 
-    console.error("Reservation error:", error);
-    return NextResponse.json(
-      { error: "Failed to create reservation" },
-      { status: 500 }
-    );
+    console.error("reservation error:", err);
+    return NextResponse.json({ error: "Failed to create reservation" }, { status: 500 });
   }
 }
