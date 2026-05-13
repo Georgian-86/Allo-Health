@@ -43,7 +43,6 @@ function Banner({ type, children }: { type: "error" | "warn"; children: React.Re
 
 function CheckoutInner() {
   const searchParams = useSearchParams();
-  const router = useRouter();
   const productId = searchParams.get("productId");
 
   const [product, setProduct] = useState<Product | null>(null);
