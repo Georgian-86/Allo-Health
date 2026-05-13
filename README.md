@@ -1,5 +1,7 @@
 # allo-reservation
 
+**Live Demo**: [https://allo-reservation.vercel.app](https://allo-reservation.vercel.app)
+
 Inventory reservation system for multi-warehouse retail. Handles the race condition between payment processing and available stock by holding units during checkout.
 
 ## How it works
